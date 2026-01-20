@@ -1,72 +1,56 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import numpy as np
+import sqlite3
 import matplotlib.pyplot as plt
 
-# Sayfa Yapılandırması
-st.set_page_config(page_title="Emre Orman | Aktueryal Emeklilik", layout="wide")
+st.set_page_config(page_title="Emre Orman - Emeklilik Modeli", layout="wide")
+st.title("📈 Aktüeryal Emeklilik Projeksiyonu")
 
-def emeklilik_motoru(emeklilik_yasi, birikim, teknik_faiz):
-    conn = sqlite3.connect('hayat_sigortasi.db')
-    query = f"SELECT yas, qx FROM mortalite_tablosu WHERE yas >= {emeklilik_yasi}"
-    df = pd.read_sql(query, conn)
-    conn.close()
-    
-    bugunku_deger = 0
-    hayatta_kalma_ihtimali = 1.0
-    projeksiyon = []
-    
-    for i, row in df.iterrows():
-        t = i
-        iskonto = 1 / ((1 + teknik_faiz) ** t)
-        bugunku_deger += hayatta_kalma_ihtimali * iskonto
-        
-        # Grafik için verileri topla
-        projeksiyon.append({
-            'Yas': row['yas'],
-            'Hayatta_Kalma_%': hayatta_kalma_ihtimali * 100,
-            'Paranin_Degeri': iskonto
-        })
-        hayatta_kalma_ihtimali *= (1 - row['qx'])
-        
-    return bugunku_deger, pd.DataFrame(projeksiyon)
+# Veritabanı Bağlantısı
+def get_qx_data(yas):
+    try:
+        conn = sqlite3.connect('hayat_sigortasi.db')
+        query = f"SELECT yas, qx FROM trh2010 WHERE yas >= {yas}"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except:
+        return pd.DataFrame({'yas': range(yas, 101), 'qx': [0.01] * (101-yas)})
 
-# --- ARAYÜZ ---
-st.title("🛡️ Aktüeryal Emeklilik ve Yaşam Planlayıcı")
-st.markdown("Bu sistem, **TRH-2010 Mortalite Tablosu** verilerini kullanarak finansal gelecek tahmini yapar.")
+# Sidebar
+st.sidebar.header("Parametreler")
+birikim = st.sidebar.number_input("Hedeflenen Birikim (TL)", min_value=100000, value=5000000, step=100000)
+emeklilik_yasi = st.sidebar.slider("Emeklilik Yaşı", 45, 85, 65)
+teknik_faiz = st.sidebar.slider("Yıllık Teknik Faiz (%)", 0.0, 15.0, 3.0) / 100
+enflasyon = st.sidebar.slider("Beklenen Yıllık Enflasyon (%)", 0.0, 50.0, 10.0) / 100
 
-with st.sidebar:
-    st.header("Parametreler")
-    mevcut_yas = st.slider("Mevcut Yaşınız", 18, 60, 30)
-    emeklilik_yasi = st.slider("Emeklilik Hedef Yaşı", 55, 80, 65)
-    birikim = st.number_input("Hedeflenen Toplam Birikim (TL)", 100000, 10000000, 1000000, step=50000)
-    teknik_faiz = st.slider("Yıllık Teknik Faiz (%)", 1.0, 10.0, 4.0) / 100
+# Aktüeryal Hesaplama
+v = (1 + teknik_faiz) / (1 + enflasyon) - 1
+if v == 0: v = 0.00001
 
-if st.button("Emeklilik Planını Oluştur"):
-    katsayi, df_grafik = emeklilik_motoru(emeklilik_yasi, birikim, teknik_faiz)
-    yillik_maas = birikim / katsayi
-    aylik_maas = yillik_maas / 12
-    
-    # Metrikler
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Anüite Katsayısı", f"{katsayi:.2f}")
-    c2.metric("Tahmini Aylık Maaş", f"{aylik_maas:,.2f} TL")
-    c3.metric("Yaşam Beklentisi (Emeklilikten Sonra)", f"{len(df_grafik)} Yıl")
-    
-    st.divider()
-    
-    # Grafikler
-    col_sol, col_sag = st.columns(2)
-    
-    with col_sol:
-        st.subheader("⏳ Yaşlandıkça Hayatta Kalma Olasılığı")
-        st.line_chart(df_grafik.set_index('Yas')['Hayatta_Kalma_%'])
-        st.caption("Bu grafik, seçtiğiniz emeklilik yaşından itibaren yaşam olasılığınızın azalışını gösterir.")
-        
-    with col_sag:
-        st.subheader("📉 Paranın Zaman Değeri (İskonto)")
-        st.area_chart(df_grafik.set_index('Yas')['Paranin_Degeri'])
-        st.caption("Gelecekteki 1 TL'nin bugün aslında ne kadar ettiğini gösteren finansal değer kaybı.")
+df_qx = get_qx_data(emeklilik_yasi)
+n = len(df_qx)
+yillar = np.arange(n)
+hayatta_kalma = (1 - df_qx['qx']).cumprod()
+ax = sum(hayatta_kalma * ((1 + v)**-yillar))
 
-    st.success(f"Analiz Tamamlandı: {emeklilik_yasi} yaşında emekli olursanız, paranın zaman değerine ve mortalite riskine göre aylık net maaşınız hesaplanmıştır.")
+baslangic_maasi = (birikim / ax) / 12
+
+# Metrikler
+col1, col2 = st.columns(2)
+col1.metric("İlk Emekli Maaşı (Aylık)", f"{baslangic_maasi:,.2f} TL")
+col2.metric("Reel Faiz Oranı", f"%{v*100:.2f}")
+
+# ZAMAN ETKİSİ GRAFİĞİ
+st.subheader("📊 Zamanın Etkisi: Enflasyon Altında Maaş Seyri")
+gelecek_maaslar = [baslangic_maasi * ((1 + enflasyon)**t) for t in range(n)]
+
+fig, ax_plot = plt.subplots(figsize=(10, 4))
+ax_plot.plot(df_qx['yas'], gelecek_maaslar, color='#2ecc71', linewidth=2)
+ax_plot.fill_between(df_qx['yas'], gelecek_maaslar, alpha=0.2, color='#2ecc71')
+ax_plot.set_xlabel("Yaş")
+ax_plot.set_ylabel("Maaş (TL)")
+st.pyplot(fig)
+
+st.info("Bu modelde maaşınız her yıl enflasyon oranında artırılarak alım gücünüz korunmaktadır.")
